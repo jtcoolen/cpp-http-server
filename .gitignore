@@ -1,0 +1,11 @@
+build/
+build-*/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+Testing/
+compile_commands.json
+*.o
+*.tmp
+port-file*
+__pycache__/
