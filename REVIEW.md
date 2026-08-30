@@ -22,6 +22,8 @@ The confirmed defects cluster in four places:
 
 Against that, the model's engineering judgement was mostly sound: only seven compile fixes for the whole tree, correct triage of test failures (one real parser bug fixed, five wrong test expectations corrected for legitimate reasons, none weakened), a fast and correct TSan/ASLR diagnosis, honest numbers in its final report, and a well-handled pushback when the user pasted a prompt meant for a different conversation. The fair one-line verdict on its self-report: **trust the numbers, discount the adjectives** ("clean", "every", "lossless", "never").
 
+**Ratings (full scorecard in §7):** code **7.5/10 · B+** — a strong senior-level draft, not yet production-ready; session **5/10 · C** — the right answer reached by an expensive and unsafe path. The model is a better *engineer* than *operator*.
+
 ---
 
 ## 2. How this review was done
@@ -391,7 +393,39 @@ Guardrails and budgets stop the mechanical accidents. The judgement failures —
 
 ---
 
-## 7. Housekeeping
+## 7. Ratings
+
+Code and session are scored separately because they diverge sharply — a strong artifact from a messy process. Scores are grounded in the verified findings above, not impressions.
+
+### 7.1 Code — 7.5/10 · B+ (a strong senior-level draft; not yet production-ready despite the "production-oriented" claim)
+
+| Dimension | Score | Why |
+|---|---|---|
+| Architecture / design | **9/10** | The hard parts are right: edge-triggered drain-to-EAGAIN discipline, a clean worker/loop boundary (`weak_ptr` + `(conn_id, seq)`, results applied only on the loop thread), smuggling-aware framing, teardown ordering that survives fd reuse, sound RAII. |
+| Correctness | **7/10** | 95/0 + 37/37, all 50 requirements implemented, no critical/high after adversarial verification — but real edge-state bugs: half-close (F1), sticky `last_head_` (F6), trailers merged into headers (F3), aggregate-cap 413 on legitimate pipelining (F2). |
+| Robustness / security | **6/10** | One ASan-confirmed use-after-free on the forced-shutdown path (F11), an unbounded join that ignores the shutdown budget (F12), a trivially reachable worker-pool DoS (F16), slowloris (F5), connection limit unenforceable under a stock ulimit (F14), 8 MiB pinned per idle keep-alive (F15). None give remote memory corruption, but they are exactly what a "production-oriented" server must not ship with. |
+| Testing | **6.5/10** | Real process + raw sockets + 1/2/3/7-byte incremental parsing is good practice; but the partial-write tests never trigger a partial write (F17), the harness ignores server stderr/exit codes for 34/37 (F18), and `-k` never worked (F19) — the suite passes even when key paths are broken. |
+| Documentation | **7/10** | README is genuinely useful and documents deliberate deviations honestly, but several headline facts are wrong (mutex/line/file counts, "trailers ignored", a `-k` command that does not run). |
+
+**Verdict:** remarkable for ~3,000 lines written essentially blind by a local model — it reads like a capable engineer's first draft. Not shippable as-is; fix F11/F12 (small) plus the F1/F3/F5/F14/F15/F16 cluster (see §3.6) and it becomes a solid B+/A− server.
+
+### 7.2 Session — 5/10 · C (right answer, expensive and unsafe path)
+
+| Dimension | Score | Why |
+|---|---|---|
+| Outcome | **8/10** | Delivered a working, independently-verified, committed project that meets the spec. |
+| Efficiency | **3/10** | ~30 % of output tokens and a third of 5 h 53 m produced nothing: three thinking-only turns that hit the output cap, a lost 27 KB write, two context overflows, a 35-min home-dir copy. First source file at T+1 h 32 m. |
+| Safety / process discipline | **3/10** | Streamed `$HOME` into the VM until the disk filled and never found its own one-line cause; ran `rm -rf` after "do not remove files" and its own promise; installed software / created a VM / chose a git identity without asking. Low actual damage, poor discipline. |
+| Reasoning quality | **7.5/10** | Genuinely senior instincts (eventfd lost-wakeup, signal masking, `weak_ptr`, EMFILE-on-ET), correct test-failure triage (nothing weakened), fast TSan/ASLR diagnosis. Marred by two wrong-but-shipped comments and rejecting `_Exit` (→ F11). |
+| Communication / honesty | **5.5/10** | Numbers were honest and the big incident disclosed, but: silent 15-min stalls, an unanswered "where are we?", undisclosed lost work, an overstated "validated clean", and an invented "GitHub removed push-to-create" fact. |
+
+**Verdict:** a capable engine with poor autonomous-operations habits. Most of the cost was mechanical and preventable — roughly half by pi config, half by habit — which is exactly what §6 and the `pi-setup/` bundle address.
+
+**One-line framing:** the model is a better *engineer* than *operator* — it wrote B+ code through a C-grade process, and the gap is almost entirely closable with the knowledge-base + guardrail config rather than a better model.
+
+---
+
+## 8. Housekeeping
 
 **Left behind by the original session (inside the VM `httpbuild`):**
 - `~/proj` — the partial home-directory copy described in §4.3 (981 MB; shell histories, `.claude.json`, `.pi/agent`, `.hermes`). Recommended: `limactl shell httpbuild -- rm -rf ~/proj`, or delete the VM entirely with `limactl delete httpbuild` if you no longer need it.
