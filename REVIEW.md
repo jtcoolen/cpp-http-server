@@ -359,7 +359,39 @@ Of the six process incidents, roughly half the responsibility sits with pi's def
 
 ---
 
-## 6. Housekeeping
+## 6. Configuration to avoid these pitfalls (pi / knowledge base)
+
+Ready-to-install files live in `pi-setup/` (see `pi-setup/README.md`). Everything below is verified against the actual setup: pi `0.80.3`, the `llama-local` server at `192.168.1.203:8080` running `Qwen3.8-Flash-Next` (Q4_K_XL) with `n_ctx = 196608`, `total_slots = 1`, `reasoning_format = none`, `supportsReasoningEffort = false`.
+
+**The biggest single issue is already fixed.** The 133 K context overflow (§4.3 item 3) was a too-small window: 133,120 tokens at session time. The server now runs **196,608** and `models.json` matches, so that exact failure cannot recur. Do not lower it.
+
+### 6.1 Levers, in priority order
+
+1. **Knowledge base — `AGENTS.md` (highest leverage, lowest effort).** pi auto-loads `AGENTS.md` at startup (global `~/.pi/agent/AGENTS.md` + per-project). This is where the durable habits (act early, verify the negative, measure before claiming, absolute paths, ask before `rm`/install/push) become permanent instead of re-learned each session. Files: `pi-setup/AGENTS.global.md` → `~/.pi/agent/AGENTS.md`; `pi-setup/AGENTS.project.md` → this repo's `AGENTS.md` (VM/build rules).
+2. **Bound the thinking budget — fixes the 47 min of silent stalls (§4.3 item 1).** The model reasons well but never stopped to act; three turns spent their whole ~16 K output budget thinking and ended with no tool call. Merge `pi-setup/settings.snippet.json` (`defaultThinkingLevel: "low"` + `thinkingBudgets`). Because this server reports `supportsReasoningEffort: false` and `reasoning_format: none`, the *authoritative* cap is server-side: restart llama-server with `--reasoning-budget 6144` (0 disables thinking; Qwen3 also honours a `/no_think` suffix). Do **not** just raise max output — the trace shows the model would keep drafting.
+3. **Guardrail extension — turns the incidents into hard blocks.** `pi-setup/guardrails.ts` uses pi's `tool_call` hook (same API as the bundled `protected-paths.ts` example) to: put a 10-min default timeout on every bash call; refuse `tar -c … .` / `cp .` without `-C` (the missing-`cd` that copied `$HOME` into the VM); confirm `rm -rf` (block it with no UI); and block a single `write` over ~24 KB (the shape that lost the 27 KB test file). The `rm`/`tar` matchers were unit-tested against the real session commands, including the actual row-148 `tar -cf - . | limactl … 'tar -xf - -C ~/proj'` (matched per pipeline segment, so a `-C` on the extract side does not excuse its absence on the create side).
+4. **Auto-compaction** is on by default (`compaction.enabled: true`); the snippet widens `reserveTokens`/`keepRecentTokens` as insurance. With a 192 K window this is now just a backstop.
+
+### 6.2 Pitfall → lever map
+
+| Pitfall (this review) | Lever |
+|---|---|
+| 47 min of thinking-only turns, design re-derived 3× (§4.3.1) | `thinkingBudgets` + `--reasoning-budget` (server) + AGENTS "act early" |
+| 27 KB write lost → context overflow ×2 (§4.3.3) | guardrails `write` cap; AGENTS "path first, chunk >8 KB"; window already 192 K |
+| `$HOME` copied into the VM, 35 min, disk full (§4.3.4) | guardrails `tar -c … .` block + default bash timeout; AGENTS "absolute paths / `tar -C`" |
+| `rm -rf` after "do not remove files" (§4.3.4) | guardrails `rm -rf` confirm; AGENTS "ask before any rm" |
+| "validated clean" from grepping the wrong stream (§4.3.5) | AGENTS "verify the negative / check exit codes + server logs" (habit) |
+| README metrics written from memory (§3.5, §4.3.5) | AGENTS "measure before you write" |
+| invented "GitHub removed push-to-create" fact (§4.3.6) | AGENTS "state only what the evidence shows" |
+| silent stalls, unanswered status, undisclosed lost work (§4.3.7) | AGENTS "report lost work / answer status" |
+
+### 6.3 What configuration cannot fix
+
+Guardrails and budgets stop the mechanical accidents. The judgement failures — trusting a comment instead of running the code (F11), claiming a clean sanitizer run without reading the log (F18), writing a metric from memory (§3.5) — are habits; `AGENTS.md` states them but cannot enforce them. The durable fix is the workflow in §5.3 (**persist don't ruminate, verify the negative, measure then write**), and for correctness that matters, a **second adversarial pass**: a fresh session told to refute and to run the binary. That is what surfaced all 20 findings here; a self-review inside the context that produced the code mostly re-reads its own intent. Optionally, encode the verify-the-negative loop as a pi skill (`~/.pi/agent/skills/ship-server-change/SKILL.md`: write a test that fails on the current binary → fix → rebuild under ASan+TSan → grep every server log and assert exit 0 → run the full suite).
+
+---
+
+## 7. Housekeeping
 
 **Left behind by the original session (inside the VM `httpbuild`):**
 - `~/proj` — the partial home-directory copy described in §4.3 (981 MB; shell histories, `.claude.json`, `.pi/agent`, `.hermes`). Recommended: `limactl shell httpbuild -- rm -rf ~/proj`, or delete the VM entirely with `limactl delete httpbuild` if you no longer need it.
