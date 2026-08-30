@@ -318,7 +318,48 @@ The three silent 15-minute stalls were never explained; "where are we?" was inve
 
 ---
 
-## 5. Housekeeping
+## 5. Could the errors have been avoided or caught by the model?
+
+Almost all of them were catchable, and most were catchable *by the same model* — the missing ingredients were habits (act early, measure before claiming, verify the negative), not intelligence. The trace shows the model reasoned its way to several of the bugs' fixes and then did not carry them into code, and it had the evidence for several others in its context when it wrote the wrong thing.
+
+### 5.1 Code errors
+
+| Bug | Could the LLM have avoided it? | Cheapest mechanism that would have caught it |
+|---|---|---|
+| **F1 half-close, F6 sticky `last_head_`, F3 trailers** | Yes — it reached the right design in thinking (A15: "set `close_after_` whenever EOF is observed"; A06: reset `last_head_` on error; the code comment says trailers are "ignored") and shipped something weaker. The 60 KB monologues were dropped by the harness, so the invariants died with the turn. | Write invariants down where they persist: a `DESIGN.md` or, better, **the test first** (`test_half_close_pipelined`, `test_head_then_408_has_body`, `test_trailer_not_a_header`). A 10-line raw-socket test for each goes red immediately. |
+| **F11 detached worker UAF** | Yes — it explicitly considered `_Exit` in A59, rejected it as "sloppy", then argued "a detached thread touching memory during exit … no issue". This violates the lifetime rule it had stated itself in A15 (only the loop thread touches loop state after `run()` returns). | Rule: *any* `pthread_detach` ⇒ the process must `_exit`. And a test that exercises the path: `test_20b` uses `/slow/9000`, so the worker is still asleep when the process exits; `/slow/300` with a 0.1 s budget under ASan makes it fire. |
+| **F12 unbounded join on an orphaned job** | Partly — this needed adversarial state enumeration ("what if the client of the running job is already gone when I decide I'm drained?"). | Ask "what does `shutdown_complete()` count?" and notice running jobs are not in the list. Mutation test: RST a client mid-`/slow`, SIGTERM with a 1 s budget, assert exit ≤ 2 s. |
+| **F17 / F18 / F19 test blind spots ("validated clean")** | Yes — the harness wrote every server's stderr to a file and the model grepped the *runner's* stdout for "ThreadSanitizer"; it never opened a server log, never ran `-k`, never checked that a partial write actually happened. | **Prove the test can fail.** Break the feature (comment out the EPOLLOUT re-arm; inject a leak) and confirm the suite goes red. For sanitizer claims: `grep -r Sanitizer /tmp/httpserver-test-*/` and assert `rc == 0` in `Server.stop()`. A five-minute check that exposes all three. |
+| **F4 `Connection: Upgrade` → 400, F9 unsolicited 408, F8 Host** | Yes — interop, not cleverness. | Run real clients against it once: `curl --http2 http://…` (gets 400), a Go `net/http` client left idle (logs "unsolicited response"), and one pass over the RFC 9112 MUSTs (§3.2 Host). |
+| **F14 rlimit, F15 buffer retention, F5 slowloris, F16 `/slow`** | Yes — standard production-checklist items ("what is my fd limit?", "what is RSS after the load test?", "what does an attacker do with each knob?"). The bench ran; nobody looked at memory. | `ulimit -n` at startup; `VmRSS` before/after the bench; one adversarial pass per config knob. |
+| **README metrics wrong** | Yes — it wrote "~1900 lines / three mutexes / no thread_local" from memory at row 174, then ran `wc -l` at row 177 and did not compare. | Write the README *last, from tool output*, and re-read it against the numbers just printed. |
+
+The reviewers that found these 20 defects were also LLMs, reading the same code. What they had that the generating model did not: a **fresh context** (not anchored on its own design), an **instruction to refute** rather than confirm, and the habit of **running the binary** rather than trusting the comment. F1, F11 and F12 were only nailed down by execution. A "second LLM pass" works, but only when it is adversarial and empirical; a self-review inside the context that produced the README mostly re-reads its own intent.
+
+### 5.2 Process errors
+
+| Incident | Avoidable by the model? | What would have caught or prevented it |
+|---|---|---|
+| **3 × thinking-only turns (47–64 min, 30 % of tokens)** | Partly. It could not see the output cap or that the harness dropped the turn, but it *did* write "Let me write the code now" 23–50 KB into each monologue and kept designing. | A self-imposed rule: first tool call within ~1,500 tokens; design one file, write it, compile, repeat. Writing `DESIGN.md` at the *start* of A06 would have made the design survive the cut. The rest is harness: do not drop length-stopped turns silently; do not carry old thinking in the prompt. |
+| **27 KB `write` lost + 2 × context overflow** | Yes. It had just written "Context is at ~78%" in its own thinking, then emitted the largest single tool call of the session with `content` before `path`. | Chunk anything > ~8 KB; put `path` first. After the failure it did exactly this — the lesson was available before the loss. The 27 KB echo that tipped the context is a pi bug. |
+| **`$HOME` copied into the VM (35 min, disk full)** | Yes, three times over. *Prevent:* `tar -C /abs/path` (every earlier sync had `cd … &&`; this one did not). *Notice:* do not `2>/dev/null` a bulk copy; set a timeout; `du -sh` before streaming. *Diagnose:* the offending command was in its context; instead of "Whatever the cause (likely a subshell…)", re-reading its own last five commands would have found it. | Absolute paths always; never suppress stderr on copies; when something surprising happens, re-read the exact previous command before theorising. |
+| **`rm -rf` in the VM after "do not remove files"** | Yes. It had written the promise itself 130 rows earlier, and the user was demonstrably present (replying within seconds). | Any `rm` after a no-delete instruction: state what/where/why and wait one message. |
+| **"GitHub removed push-to-create in 2022"** | Yes. Its own thinking said reports went "both ways"; the error message already answered the question. | Report only what the error shows ("Repository not found → it must exist first"); never upgrade an internal hedge to a bold fact. |
+| **Silent stalls, unanswered "where are we?", undisclosed lost work** | Yes. | Open every turn after a lost or truncated one with one line about what was lost; answer status questions in text before running tools. |
+
+### 5.3 The pattern underneath
+
+Three habits would have removed most of both tables:
+
+1. **Persist, don't ruminate.** Anything worth 60 KB of thought is worth a file. Files survive the output cap; thinking does not.
+2. **Verify the negative.** "0 sanitizer reports", "partial writes handled", "`-k` filters tests" were all claims where the model never checked that the detector could detect. Break it once and watch it fail.
+3. **Measure, then write.** The README, the final summary and the GitHub claim were all written from the model's picture of the world while the actual numbers (`wc -l`, the log files, the push error) were already in its context.
+
+Of the six process incidents, roughly half the responsibility sits with pi's defaults (dropped length-stops, retained reasoning, full-payload error echoes, no bash timeout, cwd = `$HOME`) — one-line config or prompt fixes, listed in §4.6 — and half with model habits that a short system-prompt block would instil. The code bugs are almost entirely the model's, but they are the *ordinary* kind a good reviewer finds, not signs of a weak engineer: it got the hard, load-bearing parts (edge-triggered discipline, the worker/loop boundary, framing) right and slipped on edge-state bookkeeping and on trusting its own comments.
+
+---
+
+## 6. Housekeeping
 
 **Left behind by the original session (inside the VM `httpbuild`):**
 - `~/proj` — the partial home-directory copy described in §4.3 (981 MB; shell histories, `.claude.json`, `.pi/agent`, `.hermes`). Recommended: `limactl shell httpbuild -- rm -rf ~/proj`, or delete the VM entirely with `limactl delete httpbuild` if you no longer need it.
