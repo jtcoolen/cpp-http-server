@@ -1,0 +1,20 @@
+{
+  "__comment": "Merge these keys into ~/.pi/agent/settings.json (do not replace the file). Rationale in pi-setup/README.md. Values chosen for the local Qwen3.8-Flash-Next server (192K context, ~16K max output per turn).",
+
+  "defaultThinkingLevel": "low",
+
+  "thinkingBudgets": {
+    "minimal": 1024,
+    "low": 4096,
+    "medium": 8192,
+    "high": 16384
+  },
+
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 24576,
+    "keepRecentTokens": 24000
+  },
+
+  "extensions": ["extensions/guardrails.ts"]
+}
